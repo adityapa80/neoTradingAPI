@@ -1,0 +1,5 @@
+# Server-side files must keep Linux line endings (bash/systemd break on CRLF).
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.ico binary

@@ -1,0 +1,29 @@
+[Unit]
+Description=Neo Terminal (Kotak Neo trading web interface)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neo
+Group=neo
+WorkingDirectory=/opt/neo-terminal
+ExecStart=/opt/neo-terminal/.venv/bin/python app.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+
+# Hardening: the app only needs to write its data/ folder.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/neo-terminal/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

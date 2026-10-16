@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Neo Terminal</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236d8cff'/%3E%3Cpath d='M9 22l5-7 4 4 5-8' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <script>
+    try { document.documentElement.dataset.theme = localStorage.getItem('nt.theme') || 'dark'; } catch (e) {}
+  </script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js" defer></script>
+</head>
+<body>
+
+<!-- ================================================================ LOGIN -->
+<div id="login-screen" class="login hidden">
+  <div class="login-card">
+    <svg class="logo" viewBox="0 0 32 32"><rect width="32" height="32" rx="9" fill="var(--accent)"/><path d="M9 22l5-7 4 4 5-8" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <h1>Neo Terminal</h1>
+    <p>A fast, focused trading desk powered by the Kotak Neo Trade API.</p>
+    <div id="login-error" class="login-error hidden"></div>
+    <div class="login-features">
+      <div><svg class="i" viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Live quotes</div>
+      <div><svg class="i" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>Charts</div>
+      <div><svg class="i" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>Secure login</div>
+    </div>
+    <form id="login-form" class="login-form" autocomplete="off">
+      <div id="login-fields" class="login-fields">
+        <input id="login-totp" class="input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6-digit TOTP" aria-label="TOTP from your authenticator app">
+        <input id="login-mpin" class="input" type="password" inputmode="numeric" maxlength="6" placeholder="MPIN" aria-label="MPIN">
+      </div>
+      <button type="submit" class="btn btn-primary btn-lg" id="login-btn">Log in to Kotak Neo
+        <svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </form>
+    <div class="foot" id="login-foot">Code from your authenticator app. Your tokens and MPIN never leave this machine.</div>
+  </div>
+</div>
+
+<!-- ================================================================== APP -->
+<div id="app" class="app hidden">
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M9 22l5-7 4 4 5-8" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Neo Terminal</span>
+      <span class="badge-demo hidden" id="demo-badge">DEMO</span>
+      <span class="live-pill off" id="live-pill" title="Live price stream"><span class="dot"></span><span>POLLING</span></span>
+    </div>
+    <div class="indices" id="indices"></div>
+    <nav class="nav" id="nav">
+      <button data-view="dashboard" title="Dashboard (g d)"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span class="lbl">Dashboard</span></button>
+      <button data-view="orders" title="Orders (g o)"><svg class="i" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg><span class="lbl">Orders</span><span class="count hidden" id="open-count"></span></button>
+      <button data-view="options" title="Option chain (g x)"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h6M4 12h6M4 18h6M14 6h6M14 12h6M14 18h6"/><path d="M12 3v18"/></svg><span class="lbl">Options</span></button>
+      <button data-view="positions" title="Positions (g p)"><svg class="i" viewBox="0 0 24 24"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg><span class="lbl">Positions</span></button>
+      <button data-view="holdings" title="Holdings (g h)"><svg class="i" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><path d="M3.3 7L12 12l8.7-5M12 22V12"/></svg><span class="lbl">Holdings</span></button>
+      <button data-view="chart" title="Chart (g c)"><svg class="i" viewBox="0 0 24 24"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="6"/><rect x="12" y="6" width="3" height="8"/><rect x="17" y="9" width="3" height="5"/></svg><span class="lbl">Chart</span></button>
+    </nav>
+    <div class="top-actions">
+      <button class="icon-btn" id="theme-toggle" title="Toggle theme"></button>
+      <button class="icon-btn" id="shortcuts-btn" title="Keyboard shortcuts (?)"><svg class="i" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg></button>
+      <button class="avatar" id="avatar" title="Account">--</button>
+    </div>
+    <div class="menu hidden" id="user-menu"></div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="search">
+      <div class="search-box">
+        <svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="search" placeholder="Search e.g. INFY, NIFTY FUT, BANKNIFTY CE" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
+      </div>
+      <div class="search-results hidden" id="search-results"></div>
+    </div>
+    <div class="wl-head"><span id="wl-name">Watchlist 1</span><span id="wl-count"></span></div>
+    <div class="wl-list" id="watchlist"></div>
+    <div class="wl-tabs" id="wl-tabs"></div>
+  </aside>
+
+  <main class="main" id="main">
+    <section class="view" data-view="dashboard"></section>
+    <section class="view hidden" data-view="orders"></section>
+    <section class="view options-view hidden" data-view="options"></section>
+    <section class="view hidden" data-view="positions"></section>
+    <section class="view hidden" data-view="holdings"></section>
+    <section class="view chart-view hidden" data-view="chart">
+      <div class="chart-toolbar" id="chart-toolbar"></div>
+      <div class="chart-panes" id="chart-panes">
+        <div class="chart-pane" data-pane="0">
+          <div class="chart-head" id="chart-head"></div>
+          <div class="chart-box">
+            <div class="chart-legend" id="chart-legend"></div>
+            <div id="chart" class="chart-canvas"></div>
+            <svg class="draw-layer"></svg>
+            <div class="draw-pill hidden"></div>
+            <div class="chart-lines" id="chart-lines"></div>
+            <div class="chart-overlay" id="chart-overlay"></div>
+          </div>
+        </div>
+        <div class="chart-pane" data-pane="1">
+          <div class="chart-head"></div>
+          <div class="chart-box">
+            <div class="chart-legend"></div>
+            <div class="chart-canvas"></div>
+            <svg class="draw-layer"></svg>
+            <div class="draw-pill hidden"></div>
+            <div class="chart-overlay"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
