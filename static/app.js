@@ -1733,7 +1733,91 @@ function desiredLevels() {
     }
     out.push({ id: `${t.product}:entry`, kind: 'entry', t, price: t.avg, free }, ...lines);
   }
+  // Working orders (not TP / SL legs) as dashed lines: drag to change the price, ✕ to cancel.
+  for (const o of S.orders) {
+    if (o.exchange !== c.inst.exchange || o.tradingsymbol !== c.inst.tradingsymbol || !PENDING.has(o.status)) continue;
+    if (o.tag === 'ktTP' || o.tag === 'ktSL' || o.order_type === 'MARKET') continue;
+    const stop = o.order_type === 'SL' || o.order_type === 'SL-M';
+    const price = c.orderDrag?.[o.order_id] ?? (stop ? o.trigger_price : o.price);
+    if (price > 0) out.push({ id: `ord:${o.order_id}`, kind: 'order', o, price, stop });
+  }
   return out;
+}
+
+function paintOrderLevel(lv) {
+  const { o } = lv;
+  const inst = S.chart.inst;
+  const buy = o.transaction_type === 'BUY';
+  const units = o.pending_quantity || o.quantity;
+  const qty = isDeriv(inst) ? `${+(units / lotUnit(inst)).toFixed(2)}L` : `${units} qty`;
+  const type = { LIMIT: 'LMT', SL: 'SL', 'SL-M': 'SL-M' }[o.order_type] || o.order_type;
+  const hint = lv.dragging ? '<span class="hint">release to modify</span>' : lv.saving ? '<span class="hint">modifying…</span>' : '';
+  const html = `<div class="cl-hit"></div><div class="cl-lead"></div><div class="cl-pill" title="Working order: drag to change its price">`
+    + `<span class="grip hov">⋮⋮</span><span class="tag">${o.transaction_type} ${type}</span><b>${qty}</b>`
+    + `<span class="px num">${fmt(lv.price, dp(inst))}</span>${hint}`
+    + `<button data-lv="cancel-order" title="Cancel this order">✕</button></div>`;
+  lv.el.className = `cl ord ${buy ? 'buy' : 'sell'}${lv.dragging ? ' dragging' : ''}`;
+  lv.pl.applyOptions({ price: lv.price, color: cssVar(buy ? '--buy' : '--sell'), lineStyle: 2, lineWidth: 1, title: '' });
+  if (lv.html !== html) { lv.el.innerHTML = html; lv.html = html; placeLabel(lv); }
+}
+
+async function cancelChartOrder(o) {
+  try {
+    await api(`/orders/${o.variety}/${o.order_id}`, { method: 'DELETE' });
+    toast('success', `${o.transaction_type} order cancelled`, prettyKey(o), 2500);
+  } catch (e) { toast('error', 'Could not cancel the order', e.message); }
+  loadOrders().catch(() => {});
+}
+
+function startOrderDrag(lv, down) {
+  const c = S.chart;
+  const { o } = lv;
+  const rect = $('#chart').getBoundingClientRect();
+  const from = lv.price;
+  const startY = c.series.priceToCoordinate(from);
+  const pinned = lv.el.classList.contains('pin-up') || lv.el.classList.contains('pin-down');
+  const grab = startY == null || pinned ? 0 : down.clientY - rect.top - startY;
+  const auto = c.api.priceScale('right').options().autoScale;
+  c.api.applyOptions({ handleScroll: false, handleScale: false });
+  c.api.priceScale('right').applyOptions({ autoScale: false });
+  c.orderDrag = c.orderDrag || {};
+  lv.dragging = true;
+  const move = (ev) => {
+    const p = c.series.coordinateToPrice(ev.clientY - rect.top - grab);
+    if (p == null || p <= 0) return;
+    c.orderDrag[o.order_id] = roundTick(p);
+    syncChartLevels();
+  };
+  const up = async () => {
+    document.removeEventListener('pointermove', move);
+    lv.dragging = false;
+    c.api.applyOptions({ handleScroll: true, handleScale: true });
+    c.api.priceScale('right').applyOptions({ autoScale: auto });
+    const to = c.orderDrag[o.order_id];
+    if (to == null || to === from) { delete c.orderDrag[o.order_id]; syncChartLevels(); return; }
+    // A stop-limit keeps its gap between trigger and limit; a limit just moves.
+    const body = { order_type: o.order_type, quantity: o.quantity, exchange: o.exchange, tradingsymbol: o.tradingsymbol };
+    if (o.order_type === 'LIMIT') body.price = to;
+    else {
+      body.trigger_price = to;
+      if (o.order_type === 'SL') body.price = roundTick(o.price + (to - o.trigger_price));
+    }
+    lv.saving = true;
+    syncChartLevels();
+    try {
+      await api(`/orders/${o.variety}/${o.order_id}`, { method: 'PUT', body });
+      toast('success', `${o.transaction_type} order moved to ${fmt(to)}`, prettyKey(o), 2500);
+      await loadOrders().catch(() => {});
+    } catch (e) {
+      toast('error', 'Could not modify the order', e.message);
+    } finally {
+      lv.saving = false;
+      delete c.orderDrag[o.order_id];
+      syncChartLevels();
+    }
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up, { once: true });
 }
 
 function clearLevels() {
@@ -1763,6 +1847,7 @@ function syncChartLevels() {
 }
 
 function paintLevel(lv) {
+  if (lv.kind === 'order') { paintOrderLevel(lv); return; }
   const inst = S.chart.inst;
   const n = dp(inst);
   const t = lv.t;
@@ -2081,7 +2166,7 @@ function startLevelDrag(lv, down) {
 
 // Saves are serialised per trade; changes made while one is in flight go out
 // right after it (a drag in progress is saved on drop).
-const isDragging = (product) => [...LV.values()].some((l) => l.dragging && l.t.product === product);
+const isDragging = (product) => [...LV.values()].some((l) => l.dragging && l.t?.product === product);
 const savingProt = new Map();
 async function saveProtection(product, msg = 'TP / SL updated', opts = {}) {
   const c = S.chart;
@@ -2132,6 +2217,7 @@ async function saveProtection(product, msg = 'TP / SL updated', opts = {}) {
 }
 
 function levelAction(lv, act) {
+  if (lv.kind === 'order') { if (act === 'cancel-order') cancelChartOrder(lv.o); return; }
   const c = S.chart;
   const product = lv.t.product;
   const asPos = () => ({ exchange: c.inst.exchange, tradingsymbol: c.inst.tradingsymbol, product, quantity: lv.t.qty,
@@ -2883,6 +2969,7 @@ function bindEvents() {
     e.preventDefault();
     const btn = e.target.closest('[data-lv]');
     if (btn) levelAction(lv, btn.dataset.lv);
+    else if (lv.kind === 'order') startOrderDrag(lv, e);
     else if (lv.kind !== 'entry') startLevelDrag(lv, e);
   });
 

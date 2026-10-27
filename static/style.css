@@ -472,6 +472,9 @@ kbd {
 .cl.sl { --lc: var(--down); }
 .cl.entry.long { --lc: var(--buy); }
 .cl.entry.short { --lc: var(--sell); }
+.cl.ord.buy { --lc: var(--buy); }
+.cl.ord.sell { --lc: var(--sell); }
+.cl.ord .cl-pill { border-style: dashed; }
 .cl-hit { position: absolute; left: 0; right: 0; top: -6px; height: 12px; cursor: ns-resize; pointer-events: auto; }
 /* Line outside the visible price range: only its label shows, pinned to the edge */
 .cl.pin-up .cl-hit, .cl.pin-down .cl-hit, .cl.pin-up .cl-lead, .cl.pin-down .cl-lead { display: none; }
@@ -721,12 +724,15 @@ table.oc tbody tr:hover .oc-acts { display: inline-flex; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
 /* ========================================================= responsive == */
+/* Keep NIFTY, BANK NIFTY and SENSEX visible: on narrower screens the menu goes icon-only first */
 @media (max-width: 1480px) {
-  .indices .idx:nth-child(3) { display: none; }
+  .nav button .lbl { display: none; }
+  .idx { padding: 4px 8px; }
 }
 @media (max-width: 1280px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .indices .idx:nth-child(n+3) { display: none; }
+  .topbar { gap: 14px; }
+  .idx .c { display: none; }
 }
 @media (max-width: 1024px) {
   :root { --sidebar-w: 290px; }

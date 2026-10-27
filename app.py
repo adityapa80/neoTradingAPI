@@ -161,8 +161,11 @@ class InstrumentStore:
         if not q:
             return []
         terms = q.split()
+        today = date.today().isoformat()
         scored = []
         for inst in self.items:
+            if inst["expiry"] and inst["expiry"] < today:
+                continue  # expired contracts linger in the scrip master
             sym, name = inst["tradingsymbol"], (inst["name"] or "").upper()
             hay = f"{sym} {name}"
             if not all(t in hay for t in terms):
@@ -175,15 +178,17 @@ class InstrumentStore:
                 score += 50
             elif name.startswith(terms[0]):
                 score += 30
+            if inst["expiry"] and name == terms[0]:
+                score += 20  # "NIFTY ..." means NIFTY contracts before NIFTYNXT50 / FINNIFTY ones
             if inst["segment"] in ("NSE", "INDICES"):
                 score += 15
             elif inst["segment"] == "BSE":
                 score += 10
-            score -= len(sym) * 0.1
+            if not inst["expiry"]:
+                score -= len(sym) * 0.1  # shorter cash symbols first; contracts sort by expiry below
             scored.append((score, inst))
-            if len(scored) > 2000:
-                break
-        scored.sort(key=lambda s: -s[0])
+        # Best match first; among equally good contracts the nearest expiry, then the strike.
+        scored.sort(key=lambda s: (-s[0], s[1]["expiry"] or "", s[1]["strike"], s[1]["tradingsymbol"]))
         return [i for _, i in scored[:limit]]
 
     def get(self, key):
@@ -420,7 +425,17 @@ def place_order(variety):
     check_lot_multiple(params.get("exchange"), params.get("tradingsymbol"), params.get("quantity", 0))
     ltp = limit_as_stop(params, params.get("exchange"), params.get("tradingsymbol"),
                         params.get("transaction_type")) if variety == "regular" else None
-    res = broker.place_order(variety, params)
+    # Selling part of a protected position: shrink its resting TP/SL first, or Kotak's risk
+    # system rejects the sell as a fresh short. Put them back if the sell doesn't go through.
+    room = protections.make_room(params.get("exchange"), params.get("tradingsymbol"), params.get("product"),
+                                 params.get("transaction_type"), int(params.get("quantity") or 0)) \
+        if variety == "regular" else None
+    try:
+        res = broker.place_order(variety, params)
+    except NeoError as err:
+        protections.restore_room(room, f"Your exit order was refused: {err.message}")
+        raise
+    protections.exit_placed(room, res.get("order_id"))
     return jsonify({**res, "as_stop": ltp is not None, "ltp": ltp})
 
 

@@ -245,6 +245,89 @@ class ProtectionManager:
                         f"The target exit was refused and the stop-loss could not be restored: {exc.message}")
         return True
 
+    # ------------------------------------------------------- manual exits
+    @staticmethod
+    def _resting(rec):
+        """Quantity of exit orders this manager has resting at the exchange for a trade."""
+        return sum(t["qty"] for t in rec["tranches"] if t.get("sl_order_id")) + \
+            sum(t["qty"] for t in rec["tranches"] if t.get("tp_order_id"))
+
+    def make_room(self, exchange, symbol, product, side, qty):
+        """Before the user exits `qty` of a protected trade by hand: Kotak's risk system rejects
+        exit orders beyond the open quantity (it margins the excess as a fresh short), so shrink
+        the resting TP/SL orders to the lots that will still be held. Legs farthest from the
+        market go first. Returns what is needed to put them back if the exit doesn't happen."""
+        with self.lock:
+            key = self.key(exchange, symbol, product)
+            rec = self.items.get(key)
+            if not rec or side != ("SELL" if rec["side"] == "LONG" else "BUY"):
+                return None
+            held = abs(self.trade_quantity(exchange, symbol, product))
+            if not held or self._resting(rec) + qty <= held:
+                return None  # no clash: the exit fits next to the resting orders
+            long = rec["side"] == "LONG"
+            tps, sls = legs_of(rec["tranches"], "tp"), legs_of(rec["tranches"], "sl")
+            keep = max(held - qty, 0)
+            old = rec["tranches"]
+            rec["tranches"] = []
+            try:
+                if keep:
+                    lot = self._lot(exchange, symbol)
+                    desired = build_tranches(trim(tps, keep, long, "tp"), trim(sls, keep, long, "sl"), long, lot)
+                    self._reconcile(old, desired, rec, self._ltp(exchange, symbol))
+                else:
+                    self._reconcile(old, [], rec, None)
+                rec["quantity"] = keep or rec["quantity"]
+            finally:
+                if rec["tranches"]:
+                    self.items[key] = rec
+                else:
+                    self.items.pop(key, None)
+                self._save()
+                self._rebuild_watch()
+            return {"key": key, "exchange": exchange, "tradingsymbol": symbol, "product": product,
+                    "tps": tps, "sls": sls}
+
+    def exit_placed(self, room, order_id):
+        """The manual exit was accepted. If the exchange later rejects or cancels it, the
+        watcher restores the TP/SL legs (see sync)."""
+        if not room:
+            return
+        with self.lock:
+            self._pending_room = getattr(self, "_pending_room", {})
+            self._pending_room[order_id] = room
+
+    def restore_room(self, room, why):
+        """Put the TP/SL legs back as they were (trimmed to what is held now)."""
+        if not room:
+            return
+        with self.lock:
+            try:
+                held = abs(self.trade_quantity(room["exchange"], room["tradingsymbol"], room["product"]))
+                if not held:
+                    return
+                rec = self.items.get(room["key"])
+                long = (rec["side"] == "LONG") if rec else self.trade_quantity(
+                    room["exchange"], room["tradingsymbol"], room["product"]) > 0
+                tps = [dict(leg) for leg in trim(room["tps"], held, long, "tp")]
+                sls = [dict(leg) for leg in trim(room["sls"], held, long, "sl")]
+                self.set(room["exchange"], room["tradingsymbol"], room["product"], tps, sls)
+                self._event("info", f"TP / SL on {room['tradingsymbol']} restored", why)
+            except NeoError as exc:
+                self._event("error", f"{room['tradingsymbol']}: TP / SL could not be restored - set it again",
+                            f"{why} {exc.message}")
+
+    def _check_rooms(self, orders):
+        for oid, room in list(getattr(self, "_pending_room", {}).items()):
+            o = orders.get(oid)
+            status = o["status"] if o else None
+            if status in ("REJECTED", "CANCELLED"):
+                del self._pending_room[oid]
+                self.restore_room(room, f"Your exit order was {status.lower()}"
+                                        + (f": {o['status_message']}" if o.get("status_message") else "."))
+            elif status == "COMPLETE" or (status is None and oid not in orders and orders):
+                del self._pending_room[oid]
+
     def manages(self, order_id):
         """True if the order is a TP/SL exit leg placed by this manager."""
         with self.lock:
@@ -472,10 +555,11 @@ class ProtectionManager:
     # --------------------------------------------------------------- watcher
     def sync(self):
         with self.lock:
-            if not self.items or not self.broker.access_token:
+            if not self.broker.access_token or not (self.items or getattr(self, "_pending_room", None)):
                 return
             changed = False
             orders = {o["order_id"]: o for o in self.broker.orders()}
+            self._check_rooms(orders)
             positions = self._positions()
             holdings = (self.broker.holdings() if any(r["product"] == "CNC" for r in self.items.values()) else [])
             for key, rec in list(self.items.items()):

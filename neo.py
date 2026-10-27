@@ -132,6 +132,26 @@ def _price(value):
     return f"{float(value or 0):.2f}"
 
 
+def open_average(fills):
+    """Average price of the lots still open after today's fills, first in first out.
+    fills: [(side, qty, price)] oldest first. Returns (net qty, average) or (0, 0).
+    The broker's own average mixes every buy of the day, so after buy -> sell -> buy again
+    it would include lots that are already closed."""
+    lots = []  # open lots: [signed qty, price]
+    for side, qty, price in fills:
+        q = qty if side == "BUY" else -qty
+        while q and lots and (lots[0][0] > 0) != (q > 0):  # this fill closes older lots first
+            take = min(abs(q), abs(lots[0][0]))
+            lots[0][0] += take if lots[0][0] < 0 else -take
+            q += take if q < 0 else -take
+            if not lots[0][0]:
+                lots.pop(0)
+        if q:
+            lots.append([q, price])
+    net = sum(q for q, _ in lots)
+    return (net, sum(abs(q) * p for q, p in lots) / abs(net)) if net else (0, 0)
+
+
 def _token_of(seg, psym):
     return make_token(seg, psym) if seg in SEG_ID and str(psym or "").isdigit() else 0
 
@@ -422,10 +442,21 @@ class NeoClient:
                    "instrument_token": _token_of(seg, p.get("tok")),
                    "average_price": round(avg, 2), "multiplier": nf, "close_price": 0,
                    "buy_value": round(buy_amt, 2), "sell_value": round(sell_amt, 2),
-                   "buy_quantity": int(buy_q), "sell_quantity": int(sell_q), "_ltp": _num(p.get("ltp"))}
+                   "buy_quantity": int(buy_q), "sell_quantity": int(sell_q), "_ltp": _num(p.get("ltp")),
+                   "_mixed": bool(qty and buy_q and sell_q and not (_num(p.get("cfBuyQty")) or _num(p.get("cfSellQty"))))}
             if not row["_ltp"] and qty:
                 missing.append(key)
             out.append(row)
+        mixed = [r for r in out if r.pop("_mixed", False)]
+        if mixed:  # bought and sold the same contract today: average only the lots still open
+            fills = {}
+            for t in sorted(self.trades(), key=lambda t: t.get("fill_timestamp") or ""):
+                fills.setdefault((t["exchange"], t["tradingsymbol"], t["product"]), []).append(
+                    (t["transaction_type"], t["quantity"], t["average_price"]))
+            for r in mixed:
+                net, avg = open_average(fills.get((r["exchange"], r["tradingsymbol"], r["product"]), []))
+                if net == r["quantity"] and avg:
+                    r["average_price"] = round(avg, 2)
         prices = self._ltps(missing)
         for r in out:
             ltp = r.pop("_ltp") or prices.get(r.pop("key")) or r["average_price"]
@@ -903,6 +934,11 @@ class MockNeo:
             qty = p["buy_qty"] - p["sell_qty"]
             avg = (p["buy_value"] / p["buy_qty"] if qty > 0 else
                    p["sell_value"] / p["sell_qty"] if qty < 0 else 0)
+            if qty and p["buy_qty"] and p["sell_qty"]:
+                fills = [(t["transaction_type"], t["quantity"], t["average_price"]) for t in self.trades_list
+                         if (t["exchange"], t["tradingsymbol"], t["product"]) == (exch, sym, prod)]
+                net, fifo = open_average(fills)
+                avg = fifo if net == qty else avg
             pnl = p["sell_value"] - p["buy_value"] + qty * ltp
             out.append({"tradingsymbol": sym, "exchange": exch, "product": prod, "quantity": qty,
                         "instrument_token": inst["instrument_token"],
