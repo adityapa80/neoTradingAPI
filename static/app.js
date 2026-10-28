@@ -2181,6 +2181,14 @@ function startLevelDrag(lv, down) {
 
 // Saves are serialised per trade; changes made while one is in flight go out
 // right after it (a drag in progress is saved on drop).
+function applySavedProtection(inst, product, rec) {
+  const same = (p) => p.exchange === inst.exchange && p.tradingsymbol === inst.tradingsymbol && p.product === product;
+  S.prot.items = [...S.prot.items.filter((p) => !same(p)), ...(rec && rec.key ? [rec] : [])];
+  S.prot.sig = JSON.stringify(S.prot.items);
+  renderCurrent();
+  refreshChartTrades();
+}
+
 const isDragging = (product) => [...LV.values()].some((l) => l.dragging && l.t?.product === product);
 const savingProt = new Map();
 async function saveProtection(product, msg = 'TP / SL updated', opts = {}) {
@@ -2206,9 +2214,10 @@ async function saveProtection(product, msg = 'TP / SL updated', opts = {}) {
       const { msg: text, undo } = job;
       job.undo = null;
       try {
-        await api('/protections', { method: 'POST', body: { exchange: inst.exchange, tradingsymbol: inst.tradingsymbol, product, tps: sent.tps, sls: sent.sls } });
-        await loadProtections().catch(() => {});
+        const rec = await api('/protections', { method: 'POST', body: { exchange: inst.exchange, tradingsymbol: inst.tradingsymbol, product, tps: sent.tps, sls: sent.sls } });
+        applySavedProtection(inst, product, rec);
         forget();
+        loadProtections().catch(() => {});
         toast(undo ? 'info' : 'success', text, name, undo ? 6000 : 2500, undo ? {
           label: 'Undo',
           fn: () => {

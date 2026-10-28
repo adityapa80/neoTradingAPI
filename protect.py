@@ -35,6 +35,7 @@ from neo import NeoError
 log = logging.getLogger(__name__)
 
 SL_LIMIT_BUFFER = 0.01   # SL legs use a limit 1% beyond the trigger so they fill on gaps
+ORDERS_REUSE_SECONDS = 5  # how old an order book a TP/SL change may reuse
 OPEN_STATUSES = {"OPEN", "TRIGGER PENDING", "AMO REQ RECEIVED", "OPEN PENDING", "VALIDATION PENDING",
                  "PUT ORDER REQ RECEIVED", "MODIFY PENDING", "MODIFY VALIDATION PENDING"}
 LEG_NAMES = {"tp": "Target", "sl": "Stop-loss"}
@@ -484,7 +485,7 @@ class ProtectionManager:
                 live.append({**same, "tp_id": d["tp_id"], "sl_id": d["sl_id"]})
             else:
                 todo.append(d)
-        orders = {o["order_id"]: o for o in self.broker.orders()} if pool else {}
+        orders = self._recent_orders(pool) if pool else {}
         try:
             for d in todo:  # reuse an existing order pair where possible (modify), else create
                 o = pool.pop(0) if pool else None
@@ -505,7 +506,9 @@ class ProtectionManager:
         t = {k: d[k] for k in ("tp_id", "sl_id", "tp", "sl", "qty")}
         exit_side = "SELL" if rec["side"] == "LONG" else "BUY"
         tick = self._tick(rec["exchange"], rec["tradingsymbol"])
-        for leg in ("tp", "sl"):
+        # The leg that goes away is cancelled before the other is placed: Kotak's RMS refuses
+        # an exit order while another one still covers the same lots.
+        for leg in ("sl", "tp") if t["sl"] is None else ("tp", "sl"):
             oid = o.get(f"{leg}_order_id") if o else None
             is_open = bool(oid) and orders.get(oid, {}).get("status") in OPEN_STATUSES
             virtual = leg == "tp" and t["tp"] is not None and t["sl"] is not None
@@ -522,7 +525,10 @@ class ProtectionManager:
                 buf = -SL_LIMIT_BUFFER if exit_side == "SELL" else SL_LIMIT_BUFFER
                 params = {"order_type": "SL", "trigger_price": t["sl"], "price": round_tick(t["sl"] * (1 + buf), tick)}
             params["quantity"] = t["qty"]
-            if is_open:
+            if is_open and o.get(leg) == t[leg] and o.get("qty") == t["qty"] and not o.get("tp_fired") \
+                    and (leg == "sl" or not o.get("tp_virtual")):
+                t[f"{leg}_order_id"] = oid  # same price and size: nothing to send
+            elif is_open:
                 res = self.broker.modify_order("regular", oid, params) or {}
                 t[f"{leg}_order_id"] = res.get("order_id") or oid  # Neo may renumber a modified order
             else:
@@ -532,6 +538,16 @@ class ProtectionManager:
                     "tag": "ktTP" if leg == "tp" else "ktSL"})
                 t[f"{leg}_order_id"] = res["order_id"]
         return t
+
+    def _recent_orders(self, tranches):
+        """The order book, reusing the watcher's copy from the last few seconds when it knows
+        every order of `tranches` (asking Kotak for the whole book costs 0.3-4 s). A leg that
+        filled since then is refused by Kotak on modify, and the watcher picks the fill up."""
+        seen = getattr(self, "_orders_seen", None)
+        ids = {t.get(f"{leg}_order_id") for t in tranches for leg in ("tp", "sl")} - {None}
+        if seen and time.monotonic() - seen[0] < ORDERS_REUSE_SECONDS and ids <= seen[1].keys():
+            return seen[1]
+        return {o["order_id"]: o for o in self.broker.orders()}
 
     def _drop_tranche(self, t, rec, orders=None):
         if orders is None:
@@ -565,7 +581,9 @@ class ProtectionManager:
             return
         # Ask Kotak first, without the lock: if it hangs, placing orders and setting TP/SL
         # (which need the lock) must not hang with it.
+        started = time.monotonic()
         orders = {o["order_id"]: o for o in self.broker.orders()}
+        self._orders_seen = (started, orders)
         positions = self._positions()
         holdings = (self.broker.holdings() if any(r["product"] == "CNC" for r in list(self.items.values())) else [])
         with self.lock:

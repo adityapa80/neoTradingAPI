@@ -76,6 +76,7 @@ HIST_MAX_CALLS = 4
 # up the screen; order placement / modify / cancel get the full time so they aren't cut short.
 READ_TIMEOUT = (3.05, 4)  # (connect, read) seconds
 ORDER_TIMEOUT = 10
+SLOW_CALL_SECONDS = 1
 # Kotak's positions call takes 0.5-1+ s. The TP/SL engine reuses a recent copy: positions only
 # change on a fill, and every fill arrives on the order feed, which drops the copy at once.
 POS_TTL_FEED_LIVE = 10  # seconds a copy may be reused while the order feed is connected
@@ -283,6 +284,8 @@ class NeoClient:
                                          timeout=ORDER_TIMEOUT if path.startswith("/quick/order/") else READ_TIMEOUT)
             except requests.RequestException as exc:
                 raise NeoError(f"Network error talking to Kotak: {exc}", "NetworkException", 502)
+            if resp.elapsed.total_seconds() > SLOW_CALL_SECONDS:
+                log.info("Kotak slow: %s %s took %.0f ms", method, path, resp.elapsed.total_seconds() * 1000)
             if resp.status_code != 429 or attempt:
                 break
             time.sleep(1)  # rate limited; retry once
