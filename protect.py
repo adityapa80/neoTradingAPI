@@ -295,7 +295,7 @@ class ProtectionManager:
             return
         with self.lock:
             self._pending_room = getattr(self, "_pending_room", {})
-            self._pending_room[order_id] = room
+            self._pending_room[order_id] = {**room, "at": time.time()}
 
     def restore_room(self, room, why):
         """Put the TP/SL legs back as they were (trimmed to what is held now)."""
@@ -325,7 +325,7 @@ class ProtectionManager:
                 del self._pending_room[oid]
                 self.restore_room(room, f"Your exit order was {status.lower()}"
                                         + (f": {o['status_message']}" if o.get("status_message") else "."))
-            elif status == "COMPLETE" or (status is None and oid not in orders and orders):
+            elif status == "COMPLETE" or (status is None and time.time() - room.get("at", 0) > 600):
                 del self._pending_room[oid]
 
     def manages(self, order_id):
@@ -356,6 +356,13 @@ class ProtectionManager:
         return out
 
     def list(self):
+        # No lock: the watcher may be waiting on Kotak while holding it, and the screen
+        # must not wait with it. A record replaced mid-read is simply read again.
+        for _ in range(3):
+            try:
+                return [self.view(r) for r in list(self.items.values())]
+            except (RuntimeError, KeyError, TypeError):
+                continue
         with self.lock:
             return [self.view(r) for r in self.items.values()]
 
@@ -554,14 +561,16 @@ class ProtectionManager:
 
     # --------------------------------------------------------------- watcher
     def sync(self):
+        if not self.broker.access_token or not (self.items or getattr(self, "_pending_room", None)):
+            return
+        # Ask Kotak first, without the lock: if it hangs, placing orders and setting TP/SL
+        # (which need the lock) must not hang with it.
+        orders = {o["order_id"]: o for o in self.broker.orders()}
+        positions = self._positions()
+        holdings = (self.broker.holdings() if any(r["product"] == "CNC" for r in list(self.items.values())) else [])
         with self.lock:
-            if not self.broker.access_token or not (self.items or getattr(self, "_pending_room", None)):
-                return
             changed = False
-            orders = {o["order_id"]: o for o in self.broker.orders()}
             self._check_rooms(orders)
-            positions = self._positions()
-            holdings = (self.broker.holdings() if any(r["product"] == "CNC" for r in self.items.values()) else [])
             for key, rec in list(self.items.items()):
                 sym = rec["tradingsymbol"]
                 keep = []

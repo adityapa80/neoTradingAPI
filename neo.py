@@ -72,6 +72,10 @@ HIST_INTERVALS = {"minute": ("1min", 30), "3minute": ("3min", 30), "5minute": ("
                   "10minute": ("10min", 60), "15minute": ("15min", 60), "30minute": ("30min", 90),
                   "60minute": ("60min", 90), "day": ("D", 180)}
 HIST_MAX_CALLS = 4
+# Kotak sometimes stops answering for a while. Reads give up fast so a stuck call can't hold
+# up the screen; order placement / modify / cancel get the full time so they aren't cut short.
+READ_TIMEOUT = (3.05, 4)  # (connect, read) seconds
+ORDER_TIMEOUT = 10
 # Kotak's positions call takes 0.5-1+ s. The TP/SL engine reuses a recent copy: positions only
 # change on a fill, and every fill arrives on the order feed, which drops the copy at once.
 POS_TTL_FEED_LIVE = 10  # seconds a copy may be reused while the order feed is connected
@@ -275,7 +279,8 @@ class NeoClient:
         for attempt in range(2):
             try:
                 resp = self.http.request(method, self.base_url + path, params=params, data=data,
-                                         headers=self._headers(kind), timeout=self.timeout)
+                                         headers=self._headers(kind),
+                                         timeout=ORDER_TIMEOUT if path.startswith("/quick/order/") else READ_TIMEOUT)
             except requests.RequestException as exc:
                 raise NeoError(f"Network error talking to Kotak: {exc}", "NetworkException", 502)
             if resp.status_code != 429 or attempt:

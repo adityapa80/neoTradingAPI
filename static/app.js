@@ -298,6 +298,21 @@ function every(ms, fn) {
   t.stop = () => { t.stopped = true; clearTimeout(t.id); };
   timers.push(t);
 }
+// One request per refresh at a time: while Kotak is slow, repeated calls would otherwise pile up
+// and use all of the browser's few connections to this server, freezing everything else.
+// A call made while one is running asks for exactly one more run after it.
+function singleFlight(fn) {
+  let running = null; let again = false;
+  const run = () => {
+    running = Promise.resolve().then(fn).finally(() => {
+      running = null;
+      if (again) { again = false; run().catch(() => {}); }
+    });
+    return running;
+  };
+  return () => { if (running) { again = true; return running; } return run(); };
+}
+
 function startPolling() {
   stopPolling();
   startStream();
@@ -3024,4 +3039,8 @@ function bindEvents() {
 }
 
 bindEvents();
+loadOrders = singleFlight(loadOrders);
+loadPortfolio = singleFlight(loadPortfolio);
+loadProtections = singleFlight(loadProtections);
+loadMargins = singleFlight(loadMargins);
 boot();
