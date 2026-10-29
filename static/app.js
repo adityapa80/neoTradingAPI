@@ -2583,7 +2583,7 @@ async function openOrder(partial, side, opts = {}) {
   const lot = inst.lot_size || 1;
   const units = modify ? o.quantity : opts.units;
   const qtyVal = units == null ? (deriv ? 1 : 1) : (deriv ? (qtyInLots(inst) ? units : Math.max(1, Math.round(units / lot))) : units);
-  const products = deriv ? [['MIS', 'Intraday'], ['NRML', 'Overnight']] : [['MIS', 'Intraday'], ['CNC', 'Longterm']];
+  const products = deriv ? [['MIS', 'Intraday'], ['NRML', 'Overnight']] : [['MIS', 'Intraday'], ['CNC', 'Longterm'], ['MTF', 'MTF']];
   const product = (modify ? o.product : opts.product) || store.get(deriv ? 'lastProductDeriv' : 'lastProduct', deriv ? 'NRML' : 'CNC');
   const orderType = (modify ? o.order_type : opts.orderType) || 'MARKET';
   const ltp = S.quotes[inst.key]?.last_price;

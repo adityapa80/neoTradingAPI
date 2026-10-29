@@ -905,7 +905,7 @@ class MockNeo:
     def profile(self):
         return {"user_id": "DEMO01", "user_name": "Demo Trader", "user_shortname": "Demo",
                 "email": "demo@example.com", "broker": "KOTAK NEO",
-                "exchanges": ["NSE", "BSE", "NFO", "BFO"], "products": ["CNC", "MIS", "NRML"]}
+                "exchanges": ["NSE", "BSE", "NFO", "BFO"], "products": ["CNC", "MIS", "NRML", "MTF"]}
 
     def margins(self):
         used = sum(abs(p["quantity"]) * p["average_price"] * (0.2 if p["product"] == "MIS" else 1)
