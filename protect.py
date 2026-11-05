@@ -44,6 +44,8 @@ MAX_UNITS_PER_SIDE = 10_000
 CANCEL_CONFIRM_SECONDS = 3   # fallback exit: how long to wait for the broker to confirm the stop's cancel
 CANCEL_POLL_SECONDS = 0.25
 TP_RETRY_SECONDS = 5         # after an unconfirmed fallback, wait this long before trying the target again
+ADOPT_LOOKUPS = 2            # after a place call times out, look this many times for the order Kotak made
+ADOPT_WAIT_SECONDS = 0.5
 
 
 def round_tick(price, tick):
@@ -538,12 +540,66 @@ class ProtectionManager:
                 res = self.broker.modify_order("regular", oid, params) or {}
                 t[f"{leg}_order_id"] = res.get("order_id") or oid  # Neo may renumber a modified order
             else:
-                res = self.broker.place_order("regular", {
-                    **params, "exchange": rec["exchange"], "tradingsymbol": rec["tradingsymbol"],
-                    "transaction_type": exit_side, "product": rec["product"], "validity": "DAY",
-                    "tag": "ktTP" if leg == "tp" else "ktSL"})
+                # An earlier call that timed out on our side may have been placed at Kotak anyway:
+                # use that order rather than send a second exit for the same lots (RMS rejects it).
+                seen = getattr(self, "_orders_seen", None)
+                fresh = seen[1] if seen and time.monotonic() - seen[0] < ORDERS_REUSE_SECONDS else {}
+                books = [orders, fresh]
+                found = self._untracked_exit(rec, exit_side, params, books)
+                if found:
+                    log.info("TP/SL: using untracked %s order %s already at Kotak", leg, found)
+                    t[f"{leg}_order_id"] = found
+                    continue
+                try:
+                    res = self.broker.place_order("regular", {
+                        **params, "exchange": rec["exchange"], "tradingsymbol": rec["tradingsymbol"],
+                        "transaction_type": exit_side, "product": rec["product"], "validity": "DAY",
+                        "tag": "ktTP" if leg == "tp" else "ktSL"})
+                except NeoError as exc:
+                    if exc.error_type != "NetworkException":
+                        raise
+                    found = self._adopt_after_timeout(rec, exit_side, params)
+                    if not found:
+                        raise
+                    log.info("TP/SL: %s order %s was placed although the call timed out", leg, found)
+                    t[f"{leg}_order_id"] = found
+                    continue
                 t[f"{leg}_order_id"] = res["order_id"]
         return t
+
+    def _tracked_ids(self, rec):
+        ids = {t.get(f"{leg}_order_id") for r in list(self.items.values()) + [rec]
+               for t in r.get("tranches", []) for leg in ("tp", "sl")}
+        return ids - {None}
+
+    def _untracked_exit(self, rec, exit_side, params, books):
+        """An open exit order at Kotak for this trade, same type, size and price, that no tranche owns."""
+        tracked = self._tracked_ids(rec)
+        price_key = "trigger_price" if params["order_type"] == "SL" else "price"
+        for book in books:
+            for oid, o in (book or {}).items():
+                if oid in tracked or o.get("status") not in OPEN_STATUSES:
+                    continue
+                if (o.get("tradingsymbol") == rec["tradingsymbol"] and o.get("exchange") == rec["exchange"]
+                        and o.get("transaction_type") == exit_side and o.get("order_type") == params["order_type"]
+                        and int(o.get("quantity") or 0) == int(params["quantity"])
+                        and (not o.get("product") or str(o["product"]).upper() == rec["product"].upper())
+                        and abs(float(o.get(price_key) or 0) - float(params[price_key])) < 1e-6):
+                    return oid
+        return None
+
+    def _adopt_after_timeout(self, rec, exit_side, params):
+        for i in range(ADOPT_LOOKUPS):
+            if i:
+                time.sleep(ADOPT_WAIT_SECONDS)
+            try:
+                book = {o["order_id"]: o for o in self.broker.orders()}
+            except NeoError:
+                continue
+            found = self._untracked_exit(rec, exit_side, params, [book])
+            if found:
+                return found
+        return None
 
     def _recent_orders(self, tranches):
         """The order book, reusing the watcher's copy from the last few seconds when it knows
