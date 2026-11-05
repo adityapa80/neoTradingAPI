@@ -95,6 +95,23 @@ first live trade, confirm that Kotak accepts a TP and an SL on the same lots wit
 - **Lot sizes**: `NEO_LOT_SIZES` (default `NIFTY:65,SENSEX:20`) overrides the scrip master for those
   underlyings; the app warns on startup if Kotak's master differs.
 
+## Trade log and points vs P&L report
+
+The broker API only returns today's trades, so the app saves each day's fills to
+`data/trades/YYYY-MM-DD.json` every 5 minutes while you are logged in (and once more at
+logout). `tradereport.py` turns them into flat-to-flat trades and, per day, compares the
+points caught with the money made:
+
+```bash
+python tradereport.py --trades                # every day, with each trade listed
+python tradereport.py --from 2026-11-01 --csv trades.csv
+```
+
+It shows gross P&L, estimated charges (rates at the top of the file), net P&L, and the
+"same-size P&L": what the day would have made with every trade at that day's average
+size. The difference is the sizing effect, and each day gets a verdict: sizing, charges,
+or strategy (lost points).
+
 ## Files
 
 | File | Purpose |
@@ -103,4 +120,5 @@ first live trade, confirm that Kotak accepts a TP and an SL on the same lots wit
 | `neo.py` | Kotak Neo client (maps Neo data to the app's shape), scrip-master converter, demo-mode mock |
 | `stream.py` | Market-data feed decoder, order-update feed, SSE fan-out to browsers |
 | `protect.py` | TP/SL engine: tranches, OCO linking, resize on partial exits |
+| `tradelog.py`, `tradereport.py` | Daily fills log and the points vs P&L report |
 | `static/index.html`, `style.css`, `app.js` | The UI (vanilla JS, no build step) |

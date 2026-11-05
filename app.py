@@ -21,6 +21,7 @@ from neo import MockNeo, NeoClient, NeoError
 from net import force_ipv4
 from protect import ProtectionManager
 from stream import MockTickHub, TickHub
+from tradelog import TradeLog
 
 load_dotenv()
 # Feed, order-feed and TP/SL events go to the service log (journalctl -u neo-terminal).
@@ -229,6 +230,9 @@ if not MOCK:
     broker.token_to_key = instruments.key_for_token
 protections = ProtectionManager(broker, instruments, None if MOCK else DATA_DIR / "protections.json")
 protections.start()
+tradelog = TradeLog(broker, DATA_DIR / "trades", "kotak", instruments.get)
+if not MOCK:
+    tradelog.start()
 
 
 _sync_state = {"running": False, "again": False}
@@ -345,6 +349,11 @@ def login():
 @app.post("/api/logout")
 @require_login
 def logout():
+    if not MOCK:
+        try:
+            tradelog.save(date.today().isoformat())  # keep today's fills before the session ends
+        except Exception:
+            pass
     try:
         broker.invalidate_session()
     finally:
