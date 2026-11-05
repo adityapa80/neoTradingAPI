@@ -110,7 +110,8 @@ python tradereport.py --from 2026-11-01 --csv trades.csv
 It shows gross P&L, estimated charges (rates at the top of the file), net P&L, and the
 "same-size P&L": what the day would have made with every trade at that day's average
 size. The difference is the sizing effect, and each day gets a verdict: sizing, charges,
-or strategy (lost points).
+or strategy (lost points). Points, averages and risk are shown per index (NIFTY, SENSEX)
+and never added together, since a SENSEX point is a much smaller move than a NIFTY point.
 
 It also checks risk management. Every TP/SL change is logged with its time, so each trade
 gets the stop set at entry (planned risk in points), whether the stop was moved, how it

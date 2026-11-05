@@ -7,6 +7,8 @@ trade. For each trade:
 For each day it compares the points you caught with the money you made, and works out the
 "same-size P&L": what the day would have made with every trade at the day's average
 size. The gap between the two is what your position sizing added or cost.
+Points are only added up within one index: a SENSEX point is worth far less of a move
+than a NIFTY point, so the two are shown side by side, never summed.
 
 Risk: from the TP/SL changes the app logs, each trade gets the stop that was set when it
 was entered (its planned risk in points), whether that stop was moved, and how it ended:
@@ -292,7 +294,7 @@ def day_summary(trades):
 def verdict(s):
     if not s["trades"]:
         return "no closed trades"
-    pts, gross, net = s["points"], s["pnl"], s["net"]
+    pts, gross, net = s["same_size"], s["pnl"], s["net"]  # same-size P&L: points in rupees at constant size
     if pts > 0 and gross < 0:
         return "SIZING: caught points but lost money - losers were bigger than winners"
     if pts < 0 and gross > 0:
@@ -302,6 +304,24 @@ def verdict(s):
     if pts <= 0 and gross <= 0:
         return "STRATEGY: lost points (entries/exits), not a sizing problem"
     return "good day"
+
+
+def print_by_index(trades):
+    """Points, average winner / loser and risk for each index on its own."""
+    by_und = defaultdict(list)
+    for t in trades:
+        if not t.get("open_end"):
+            by_und[t["underlying"]].append(t)
+    fmt = lambda v, f: "-" if v is None else format(v, f)
+    for u, ts in sorted(by_und.items()):
+        s = day_summary(ts)
+        print(f"  {u} points {s['points']:+9.2f}   P&L {rupees(s['pnl'])}   "
+              f"({s['trades']} trades, {s['wins']} won, {s['losses']} lost)")
+        print(f"    average winner   {fmt(s['avg_pts_win'], '+.2f')} pts, {fmt(s['avg_size_win'], '.1f')} "
+              f"{s['size_unit']}, Rs {fmt(s['avg_pnl_win'], '+,.0f')}")
+        print(f"    average loser    {fmt(s['avg_pts_loss'], '+.2f')} pts, {fmt(s['avg_size_loss'], '.1f')} "
+              f"{s['size_unit']}, Rs {fmt(s['avg_pnl_loss'], '+,.0f')}")
+        print_risk(risk_summary(ts), indent="    ")
 
 
 def rupees(x):
@@ -350,36 +370,26 @@ def main():
                       f'{t["side"]:<5} {size_label(t):>9}  {t["entry_avg"]:8.2f} -> '
                       f'{t["exit_avg"]:8.2f}  pts {t["points"]:+7.2f}  P&L {rupees(t["pnl"])}  '
                       f'{risk:<12} {r:>6}  {t["exit_type"] or "":<9}{extra}')
-        print(f"  points caught      {s['points']:+10.2f}   (sum over trades, per unit)")
-        if len(s["by_und"]) > 1:
-            for u, (p, g, n) in sorted(s["by_und"].items()):
-                print(f"    {u:<10} {p:+10.2f} pts  P&L {rupees(g)}  ({n} trades)")
+        print_by_index(ts)
         print(f"  gross P&L        {rupees(s['pnl'])}")
         print(f"  est. charges     {rupees(-s['charges'])}")
         print(f"  net P&L          {rupees(s['net'])}")
         print(f"  same-size P&L    {rupees(s['same_size'])}   (every trade at the day's average size)")
         print(f"  sizing effect    {rupees(s['sizing'])}   (gross minus same-size)")
-        fmt = lambda v, f: "-" if v is None else format(v, f)
-        print(f"  average winner   {fmt(s['avg_pts_win'], '+.2f')} pts, {fmt(s['avg_size_win'], '.1f')} "
-              f"{s['size_unit']}, Rs {fmt(s['avg_pnl_win'], '+,.0f')}")
-        print(f"  average loser    {fmt(s['avg_pts_loss'], '+.2f')} pts, {fmt(s['avg_size_loss'], '.1f')} "
-              f"{s['size_unit']}, Rs {fmt(s['avg_pnl_loss'], '+,.0f')}")
-        print_risk(risk_summary(ts))
         print(f"  -> {s['verdict']}")
-        for k in ("points", "pnl", "charges", "net", "same_size", "sizing", "trades", "wins", "losses"):
+        for k in ("pnl", "charges", "net", "same_size", "sizing", "trades", "wins", "losses"):
             totals[k] += s[k]
         kinds[s["verdict"].split(":")[0]] += 1
 
     if len(days) > 1:
         print(f"\n=== ALL {len(days)} days  -  {int(totals['trades'])} trades "
               f"({int(totals['wins'])} won, {int(totals['losses'])} lost)")
-        print(f"  points caught      {totals['points']:+10.2f}")
         for k, label in (("pnl", "gross P&L"), ("charges", "est. charges"), ("net", "net P&L"),
                          ("same_size", "same-size P&L"), ("sizing", "sizing effect")):
             v = -totals[k] if k == "charges" else totals[k]
             print(f"  {label:<16} {rupees(v)}")
         print("  days: " + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items(), key=lambda x: -x[1])))
-        print_risk(risk_summary(trades))
+        print_by_index(trades)
 
     if args.csv:
         cols = ["day", "broker", "symbol", "underlying", "side", "open", "close", "qty", "lot_size", "lots",
