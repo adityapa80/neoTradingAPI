@@ -8,6 +8,11 @@ For each day it compares the points you caught with the money you made, and work
 "same-size P&L": what the day would have made with every trade at the day's average
 size. The gap between the two is what your position sizing added or cost.
 
+Risk: from the TP/SL changes the app logs, each trade gets the stop that was set when it
+was entered (its planned risk in points), whether that stop was moved, and how it ended:
+TP, SL or a manual exit. R = points won or lost / planned risk, so -1R is a normal stop-out
+and anything worse than about -1.1R lost more than the plan allowed.
+
 Usage:  python tradereport.py [DIR ...] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--trades] [--csv FILE]
 DIR defaults to data/trades next to this file. Pass several to combine brokers.
 """
@@ -37,7 +42,7 @@ def underlying(symbol):
 
 
 def load(dirs, start, end):
-    fills = []
+    fills, plans = [], []
     for d in dirs:
         for path in sorted(Path(d).glob("*.json")):
             day = path.stem
@@ -46,7 +51,9 @@ def load(dirs, start, end):
             data = json.loads(path.read_text(encoding="utf-8"))
             for f in data["fills"]:
                 fills.append(dict(f, broker=data.get("broker", "?"), day=data.get("date", day)))
-    return fills
+            for pl in data.get("plans", []):
+                plans.append(dict(pl, broker=data.get("broker", "?"), day=data.get("date", day)))
+    return fills, plans
 
 
 def round_trips(fills):
@@ -67,13 +74,15 @@ def round_trips(fills):
                            "underlying": underlying(sym), "side": "LONG" if sign > 0 else "SHORT",
                            "lot_size": f.get("lot_size"), "open": f["fill_timestamp"],
                            "entry_qty": 0, "entry_val": 0.0, "exit_qty": 0, "exit_val": 0.0,
-                           "buy_val": 0.0, "sell_val": 0.0, "max_qty": 0, "orders": set()}
+                           "buy_val": 0.0, "sell_val": 0.0, "max_qty": 0, "orders": set(), "exits": []}
                 # quantity that adds to the position, or closes it (a reversal splits the fill)
                 qty = left if pos == 0 or (pos > 0) == (sign > 0) else min(left, abs(pos))
                 adding = pos == 0 or (pos > 0) == (sign > 0)
                 cur["entry_qty" if adding else "exit_qty"] += qty
                 cur["entry_val" if adding else "exit_val"] += qty * price
                 cur["buy_val" if sign > 0 else "sell_val"] += qty * price
+                if not adding:
+                    cur["exits"].append((f["order_id"], qty, price))
                 cur["orders"].add((f["order_id"], f["transaction_type"]))
                 pos += sign * qty
                 left -= qty
@@ -87,6 +96,138 @@ def round_trips(fills):
             trades.append(finish(cur))
     trades.sort(key=lambda t: (t["day"], t["open"] or ""))
     return trades
+
+
+PLAN_LEAD_SECONDS = 120  # a stop saved this long before the entry fill still counts as its plan
+NEAR = 0.015             # no order-id match: an exit within 1.5% of a TP/SL price counts as that leg
+
+
+def _secs(stamp):
+    h, m, sec = (stamp or "00:00:00")[11:19].split(":")
+    return int(h) * 3600 + int(m) * 60 + int(sec)
+
+
+def _avg_price(plan, leg):
+    rows = [(t[leg], t.get("qty") or 0) for t in plan.get("tranches", []) if t.get(leg) is not None]
+    qty = sum(q for _, q in rows)
+    return (sum(p * q for p, q in rows) / qty if qty else rows[0][0]) if rows else None
+
+
+def attach_plans(trades, plans):
+    """Give each trade its planned stop, final stop and exit type from the logged TP/SL plans."""
+    by_contract = defaultdict(list)
+    for pl in plans:
+        by_contract[(pl["broker"], pl["day"], pl["exchange"], pl["tradingsymbol"])].append(pl)
+    for t in trades:
+        t.update(init_sl=None, final_sl=None, risk_pts=None, r=None, sl_moves=0, exit_type=None, over_plan=None)
+        if t.get("open_end"):
+            continue
+        start, end = _secs(t["open"]) - PLAN_LEAD_SECONDS, _secs(t["close"])
+        window = sorted((pl for pl in by_contract.get((t["broker"], t["day"], t["exchange"], t["symbol"]), [])
+                         if start <= _secs(pl["time"]) <= end), key=lambda pl: pl["time"])
+        sls = [_avg_price(pl, "sl") for pl in window if not pl.get("removed")]
+        sls = [x for x in sls if x is not None]
+        roles = {}  # order id -> TP / SL
+        for pl in window:
+            for tr in pl.get("tranches", []):
+                if tr.get("tp_order_id"):
+                    roles[str(tr["tp_order_id"])] = "TP"
+                if tr.get("sl_order_id"):
+                    roles[str(tr["sl_order_id"])] = "TP" if tr.get("tp_fired") else "SL"
+        last = next((pl for pl in reversed(window) if pl.get("tranches")), None)
+        tps = [tr["tp"] for tr in (last or {}).get("tranches", []) if tr.get("tp") is not None]
+        stops = [tr["sl"] for tr in (last or {}).get("tranches", []) if tr.get("sl") is not None]
+        kinds = defaultdict(int)
+        for oid, qty, price in t["exits"]:
+            kind = roles.get(str(oid))
+            if not kind:
+                def near(levels):
+                    return any(abs(price - lv) <= NEAR * lv for lv in levels)
+                kind = "SL" if near(stops) else "TP" if near(tps) else "manual"
+            kinds[kind] += qty
+        t["exit_type"] = "+".join(k for k in ("TP", "SL", "manual") if kinds.get(k))
+        long = t["side"] == "LONG"
+        if sls:
+            t["init_sl"], t["final_sl"] = sls[0], sls[-1]
+            t["sl_moves"] = sum(1 for a, b in zip(sls, sls[1:]) if abs(a - b) > 1e-9)
+            risk = (t["entry_avg"] - sls[0]) if long else (sls[0] - t["entry_avg"])
+            if risk > 0:
+                t["risk_pts"] = risk
+                t["r"] = t["points"] / risk
+                if t["points"] < 0:
+                    t["over_plan"] = -t["points"] - risk  # > 0: lost more than the stop allowed
+    return trades
+
+
+def _widened(t):
+    if t["final_sl"] is None or t["init_sl"] is None:
+        return False
+    return t["final_sl"] < t["init_sl"] if t["side"] == "LONG" else t["final_sl"] > t["init_sl"]
+
+
+def risk_summary(trades):
+    closed = [t for t in trades if not t.get("open_end")]
+    won = [t for t in closed if t["points"] > 0]
+    lost = [t for t in closed if t["points"] < 0]
+
+    def avg(xs):
+        return sum(xs) / len(xs) if xs else None
+    r = {"n": len(closed), "won": len(won), "lost": len(lost),
+         "avg_win": avg([t["points"] for t in won]), "avg_loss": avg([-t["points"] for t in lost]),
+         "best": max((t["points"] for t in closed), default=None),
+         "worst": min((t["points"] for t in closed), default=None),
+         "with_sl": sum(t["init_sl"] is not None for t in closed),
+         "avg_risk": avg([t["risk_pts"] for t in closed if t["risk_pts"]]),
+         "avg_r_win": avg([t["r"] for t in won if t["r"] is not None]),
+         "avg_r_loss": avg([t["r"] for t in lost if t["r"] is not None]),
+         "loss_exits": defaultdict(int),
+         "over_plan": [t for t in lost if t["over_plan"] is not None
+                       and t["over_plan"] > max(1.0, 0.1 * t["risk_pts"])],
+         "widened": sum(1 for t in closed if _widened(t)),
+         "no_sl_losses": sum(1 for t in lost if t["init_sl"] is None),
+         "expectancy": sum(t["points"] for t in closed) / len(closed) if closed else None}
+    for t in lost:
+        r["loss_exits"][t["exit_type"] or "?"] += 1
+    r["win_rate"] = len(won) / len(closed) if closed else None
+    if r["avg_win"] and r["avg_loss"]:
+        r["rr"] = r["avg_win"] / r["avg_loss"]
+        r["breakeven"] = 1 / (1 + r["rr"])
+    else:
+        r["rr"] = r["breakeven"] = None
+    return r
+
+
+def print_risk(r, indent="  "):
+    if not r["n"]:
+        return
+
+    def f(v, spec):
+        return "-" if v is None else format(v, spec)
+
+    def pct(v):
+        return "-" if v is None else f"{v * 100:.0f}%"
+    print(f"{indent}risk:")
+    print(f"{indent}  points won per winner  {f(r['avg_win'], '+.2f'):>8}   best trade  {f(r['best'], '+.2f')}")
+    print(f"{indent}  points lost per loser  {f(-r['avg_loss'] if r['avg_loss'] else None, '+.2f'):>8}"
+          f"   worst trade {f(r['worst'], '+.2f')}")
+    print(f"{indent}  reward : risk          {f(r['rr'], '.2f'):>8}   (avg points won / avg points lost)")
+    print(f"{indent}  win rate               {pct(r['win_rate']):>8}   needed to break even at this "
+          f"reward:risk: {pct(r['breakeven'])}")
+    print(f"{indent}  expectancy             {f(r['expectancy'], '+.2f'):>8}   points per trade")
+    print(f"{indent}  stop set at entry      {r['with_sl']} of {r['n']} trades, "
+          f"planned risk {f(r['avg_risk'], '.2f')} pts on average")
+    if r["avg_r_win"] is not None or r["avg_r_loss"] is not None:
+        print(f"{indent}  in R (planned risk)    winners {f(r['avg_r_win'], '+.2f')}R, "
+              f"losers {f(r['avg_r_loss'], '+.2f')}R")
+    if r["lost"]:
+        exits = ", ".join(f"{n} {k}" for k, n in sorted(r["loss_exits"].items(), key=lambda x: -x[1]))
+        print(f"{indent}  losing trades ended by {exits}")
+    if r["over_plan"]:
+        print(f"{indent}  ! {len(r['over_plan'])} loss(es) bigger than the stop that was set")
+    if r["widened"]:
+        print(f"{indent}  ! {r['widened']} trade(s) with the stop moved further away")
+    if r["no_sl_losses"]:
+        print(f"{indent}  ! {r['no_sl_losses']} loss(es) with no stop set")
 
 
 def charges(t):
@@ -176,7 +317,8 @@ def main():
     ap.add_argument("--csv", help="also write every trade to this CSV file")
     args = ap.parse_args()
 
-    trades = round_trips(load(args.dirs, args.start, args.end))
+    fills, plans = load(args.dirs, args.start, args.end)
+    trades = attach_plans(round_trips(fills), plans)
     if not trades:
         print("No fills logged for that range.")
         return
@@ -197,9 +339,17 @@ def main():
                           f'{t["max_qty"] if t["lots"] is None else t["max_qty"] / t["lot_size"]:>5g} '
                           f'{"lot" if t["lots"] is not None else "qty"}  {t["entry_avg"]:8.2f} -> still open')
                     continue
+                if t["risk_pts"]:
+                    risk = f'SL {t["risk_pts"]:5.2f} pts'
+                else:
+                    risk = "no SL" if t["init_sl"] is None else "SL in profit"
+                r = f'{t["r"]:+5.2f}R' if t["r"] is not None else ""
+                extra = (" moved SL" if t["sl_moves"] else "") + \
+                    (f' lost {t["over_plan"]:.2f} more than SL' if t["over_plan"] and t["over_plan"] > 0.5 else "")
                 print(f'  {(t["open"] or "")[11:16]}-{(t.get("close") or "")[11:16]}  {t["symbol"]:<22} '
                       f'{t["side"]:<5} {size_label(t):>9}  {t["entry_avg"]:8.2f} -> '
-                      f'{t["exit_avg"]:8.2f}  pts {t["points"]:+7.2f}  P&L {rupees(t["pnl"])}')
+                      f'{t["exit_avg"]:8.2f}  pts {t["points"]:+7.2f}  P&L {rupees(t["pnl"])}  '
+                      f'{risk:<12} {r:>6}  {t["exit_type"] or "":<9}{extra}')
         print(f"  points caught      {s['points']:+10.2f}   (sum over trades, per unit)")
         if len(s["by_und"]) > 1:
             for u, (p, g, n) in sorted(s["by_und"].items()):
@@ -214,6 +364,7 @@ def main():
               f"{s['size_unit']}, Rs {fmt(s['avg_pnl_win'], '+,.0f')}")
         print(f"  average loser    {fmt(s['avg_pts_loss'], '+.2f')} pts, {fmt(s['avg_size_loss'], '.1f')} "
               f"{s['size_unit']}, Rs {fmt(s['avg_pnl_loss'], '+,.0f')}")
+        print_risk(risk_summary(ts))
         print(f"  -> {s['verdict']}")
         for k in ("points", "pnl", "charges", "net", "same_size", "sizing", "trades", "wins", "losses"):
             totals[k] += s[k]
@@ -228,10 +379,12 @@ def main():
             v = -totals[k] if k == "charges" else totals[k]
             print(f"  {label:<16} {rupees(v)}")
         print("  days: " + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items(), key=lambda x: -x[1])))
+        print_risk(risk_summary(trades))
 
     if args.csv:
         cols = ["day", "broker", "symbol", "underlying", "side", "open", "close", "qty", "lot_size", "lots",
-                "entry_avg", "exit_avg", "points", "pnl", "charges", "n_orders"]
+                "entry_avg", "exit_avg", "points", "pnl", "charges", "n_orders",
+                "init_sl", "final_sl", "risk_pts", "r", "sl_moves", "exit_type", "over_plan"]
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(cols + ["still_open"])

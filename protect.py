@@ -110,6 +110,7 @@ class ProtectionManager:
         self.instruments = instruments
         self.path = path
         self.items = {}
+        self.on_change = None
         self.events = deque(maxlen=100)
         self.event_ids = itertools.count(1)
         self.last_event = 0
@@ -340,6 +341,11 @@ class ProtectionManager:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(self.items, indent=1))
             tmp.replace(self.path)
+        if self.on_change:  # e.g. the trade log keeps the TP/SL plan of each trade
+            try:
+                self.on_change(self.items)
+            except Exception as exc:
+                log.warning("protection change hook: %s", exc)
 
     def _event(self, kind, title, text=""):
         self.last_event = next(self.event_ids)

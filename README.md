@@ -112,6 +112,13 @@ It shows gross P&L, estimated charges (rates at the top of the file), net P&L, a
 size. The difference is the sizing effect, and each day gets a verdict: sizing, charges,
 or strategy (lost points).
 
+It also checks risk management. Every TP/SL change is logged with its time, so each trade
+gets the stop set at entry (planned risk in points), whether the stop was moved, how it
+ended (TP, SL or manual) and its R multiple. Per day and overall you get points won per
+winner vs points lost per loser, reward:risk, win rate against the break-even win rate,
+expectancy, and flags for losses bigger than the stop, stops moved further away, and
+losses with no stop.
+
 ## Files
 
 | File | Purpose |
